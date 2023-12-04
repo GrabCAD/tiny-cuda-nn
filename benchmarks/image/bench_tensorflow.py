@@ -61,7 +61,7 @@ class Function:
 class Image(Function):
 	def __init__(self, filename):
 		self.filename = filename
-		paths = glob.glob(os.path.join(SCRIPT_DIR, "images", self.filename + ".*"))
+		paths = glob.glob(os.path.join(SCRIPT_DIR, "images", f"{self.filename}.*"))
 		if not paths:
 			raise ValueError(f"Invalid image name '{filename}''")
 		path = paths[0] # Use first path that exists
@@ -95,55 +95,51 @@ class OneBlob:
         self.radius = 0.5 / n_bins
 
     def __call__(self, inputs, wraparound, name, dtype=None):
-        def gaussian_cdf_approx(x, radius):
-            return 0.5 * (1 + tf.tanh(1.12 * x / (math.sqrt(2.) * radius)))
+    	def gaussian_cdf_approx(x, radius):
+    	    return 0.5 * (1 + tf.tanh(1.12 * x / (math.sqrt(2.) * radius)))
 
-        def gaussian_cdf(x, radius):
-            return 0.5 * (1 + tf.erf(x / (math.sqrt(2.) * radius)))
+    	def gaussian_cdf(x, radius):
+    	    return 0.5 * (1 + tf.erf(x / (math.sqrt(2.) * radius)))
 
-        dims = inputs.shape[-1]
-        with tf.name_scope(name):
-            # When there are no input dims, there is nothing to encode.
-            # This special case is needed because tf.reshape does strange
-            # things when 0-dims are involved.
-            if dims == 0:
-                return inputs
-            results = []
-            boundaries = tf.linspace(0., 1., self.n_bins + 1)
-            boundaries = tf.reshape(boundaries, [1 for _ in inputs.shape] + [-1])
+    	dims = inputs.shape[-1]
+    	with tf.name_scope(name):
+    		# When there are no input dims, there is nothing to encode.
+    		# This special case is needed because tf.reshape does strange
+    		# things when 0-dims are involved.
+    		if dims == 0:
+    		    return inputs
+    		results = []
+    		boundaries = tf.linspace(0., 1., self.n_bins + 1)
+    		boundaries = tf.reshape(boundaries, [1 for _ in inputs.shape] + [-1])
 
-            for level in range(self.n_levels):
-                with tf.name_scope(f"level{level}"):
-                    scale = self.n_bins**level
+    		for level in range(self.n_levels):
+    			with tf.name_scope(f"level{level}"):
+    				scale = self.n_bins**level
 
-                    # We use the absolute value here just in case the inputs are erroneously negative.
-                    # Even a negative epsilon would totally wreck the following code.
-                    if level == 0:
-                        scaled = tf.abs(inputs)
-                    else:
-                        scaled = tf.abs(inputs * scale) % 1
+    				                # We use the absolute value here just in case the inputs are erroneously negative.
+    				                # Even a negative epsilon would totally wreck the following code.
+    				scaled = tf.abs(inputs) if level == 0 else tf.abs(inputs * scale) % 1
+    				diffs = boundaries - scaled[..., tf.newaxis]
+    				cdfs = gaussian_cdf_approx(diffs, self.radius)
+    				result = cdfs[...,1:] - cdfs[...,:-1]
 
-                    diffs = boundaries - scaled[..., tf.newaxis]
-                    cdfs = gaussian_cdf_approx(diffs, self.radius)
-                    result = cdfs[...,1:] - cdfs[...,:-1]
+    				# print_op = tf.print("result: ", result)
 
-                    # print_op = tf.print("result: ", result)
+    				# In the outermost level we don't want to carry over...
+    				# otherwise we introduce ambiguities.
+    				if level != 0 or wraparound:
+    				    cdfs_right = gaussian_cdf_approx(diffs + 1., self.radius)
+    				    cdfs_left = gaussian_cdf_approx(diffs - 1., self.radius)
+    				    result = result + cdfs_right[...,1:] - cdfs_right[...,:-1] + cdfs_left[...,1:] - cdfs_left[...,:-1]
 
-                    # In the outermost level we don't want to carry over...
-                    # otherwise we introduce ambiguities.
-                    if level != 0 or wraparound:
-                        cdfs_right = gaussian_cdf_approx(diffs + 1., self.radius)
-                        cdfs_left = gaussian_cdf_approx(diffs - 1., self.radius)
-                        result = result + cdfs_right[...,1:] - cdfs_right[...,:-1] + cdfs_left[...,1:] - cdfs_left[...,:-1]
+    				# with tf.control_dependencies([print_op]):
+    				result = result / scale
 
-                    # with tf.control_dependencies([print_op]):
-                    result = result / scale
+    				results.append(result)
 
-                    results.append(result)
-
-            result = tf.concat(results, axis=-1)
-            result = tf.reshape(result, [-1, self.n_bins * self.n_levels * dims])
-            return result
+    		result = tf.concat(results, axis=-1)
+    		result = tf.reshape(result, [-1, self.n_bins * self.n_levels * dims])
+    		return result
 
 
 def get_args():
@@ -152,8 +148,7 @@ def get_args():
 	parser.add_argument("-c", "--config", default="config.json", type=str, help="JSON config filename")
 	parser.add_argument("-i", "--image", default="albert", type=str, help="Image to match")
 
-	args = parser.parse_args()
-	return args
+	return parser.parse_args()
 
 
 
@@ -215,7 +210,7 @@ def get_train_op(config, variables, gradients, optimizer, clip_norm=0):
 	else:
 		gradients_norm = tf.global_norm(gradients)
 
-	if gradients and not all(grad is None for grad in gradients):
+	if gradients and any(grad is not None for grad in gradients):
 		train_op = optimizer.apply_gradients(zip(gradients, variables), name="apply_gradients")
 	else:
 		train_op = tf.no_op(name="apply_gradients")
@@ -234,7 +229,9 @@ def make_graph():
 		current_tensor = linear_layer(current_tensor, config["network"]["n_neurons"], tf.float16, f"fc{i}", False)
 		current_tensor = activation(current_tensor, config["network"]["activation"])
 
-	output_tensor = linear_layer(current_tensor, target_fun.n_channels, tf.float16, f"fc_out", False)
+	output_tensor = linear_layer(
+		current_tensor, target_fun.n_channels, tf.float16, "fc_out", False
+	)
 	output_tensor = activation(output_tensor, config["network"]["output_activation"])
 
 	relative_l2_error = (target_tensor - output_tensor)**2 / (tf.stop_gradient(output_tensor)**2 + 0.01)

@@ -50,9 +50,7 @@ def P(l,m):
 def Y(l,m):
 	if m>0:
 		return sqrt(2)*K(l,m)*C[m]*P(l,m)
-	if m<0:
-		return sqrt(2)*K(l,m)*S[-m]*P(l,-m)
-	return K(l,m)*P(l,m)
+	return sqrt(2)*K(l,m)*S[-m]*P(l,-m) if m<0 else K(l,m)*P(l,m)
 
 #-------------------------------------------------------
 for diffvar in [False,x,y,z] if do_diff else [False]:
